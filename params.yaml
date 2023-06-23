@@ -22,4 +22,4 @@ odom_topic: "/odom"
 particle_filter_frame: "/base_link_pf"
 
 # Deterministic flag; set to true to remove all added noise
-deterministic: true
+deterministic: True

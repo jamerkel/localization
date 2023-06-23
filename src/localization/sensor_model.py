@@ -17,18 +17,22 @@ class SensorModel:
         self.num_beams_per_particle = rospy.get_param("~num_beams_per_particle")
         self.scan_theta_discretization = rospy.get_param("~scan_theta_discretization")
         self.scan_field_of_view = rospy.get_param("~scan_field_of_view")
+        self.num_particles = rospy.get_param("~num_particles")
+        self.lidar_scale_to_map_scale = rospy.get_param("~lidar_scale_to_map_scale")
+
 
         ####################################
-        # TODO
         # Adjust these parameters
-        self.alpha_hit = 0
-        self.alpha_short = 0
-        self.alpha_max = 0
-        self.alpha_rand = 0
-        self.sigma_hit = 0
+        self.alpha_hit = 0.74
+        self.alpha_short = 0.07
+        self.alpha_max = 0.07
+        self.alpha_rand = 0.12
+        self.sigma_hit = 8.0
 
         # Your sensor table will be a `table_width` x `table_width` np array:
-        self.table_width = 201
+        self.zmax = self.num_particles
+        self.table_width = self.zmax + 1
+
         ####################################
 
         # Precompute the sensor model table
@@ -71,7 +75,39 @@ class SensorModel:
         returns:
             No return type. Directly modify `self.sensor_model_table`.
         """
-        raise NotImplementedError
+        length = self.table_width
+        self.sensor_model_table = np.zeros((length, length))
+        for d in range(length):
+            #normalize p_hit, separately normalize p_tot
+            p_hit_tot = 0.
+            p_hit_arr = []
+            #p_hit normalized later
+            norm = self.alpha_hit
+
+            for z in range(length):
+                p = 0.
+                p_hit = self.alpha_hit*np.exp(-float(z-d)**2/(2.*self.sigma_hit**2))/np.sqrt(2.0*np.pi)
+                p_hit_tot += p_hit
+                p_hit_arr.append(p_hit)
+                
+                #p_short
+                if z <= d and d != 0:
+                    p += self.alpha_short*(2./d)*(1-(z/d))
+                #p_max
+                if z == self.zmax:
+                    p += self.alpha_max
+
+                #p_rand
+                p += self.alpha_rand/float(self.zmax)
+
+                self.sensor_model_table[z,d] = prob
+                norm += p
+            #normalize all p_hit values for every value of z
+            self.sensor_model_table[:, d] += p_hit_arr/p_hit_tot
+            #normalize all p values for every value of z
+            self.sensor_model_table[:, d] /= norm
+
+
 
     def evaluate(self, particles, observation):
         """
@@ -98,14 +134,30 @@ class SensorModel:
             return
 
         ####################################
-        # TODO
         # Evaluate the sensor model here!
         #
         # You will probably want to use this function
         # to perform ray tracing from all the particles.
         # This produces a matrix of size N x num_beams_per_particle 
 
-        scans = self.scan_sim.scan(particles)
+        scaling = float(self.map_resolution * self.lidar_scale_to_map_scale)
+        scans = self.scan_sim.scan(particles) / scaling
+        observation /= scaling
+
+        observation[i>self.zmax] = self.zmax
+        observation[i<0] = 0
+
+        scans[i>self.zmax] = self.zmax
+        scans[i<0] = 0
+
+        scans_int = np.rint(scans)
+        obs_int = np.rint(observation)
+
+        probabilities = np.prod(self.sensor_model_table[scans_int, obs_int] axis=1)
+        prob_squash = np.power(probabilities, 1./2.2)
+
+        return(prob_squash)
+
 
         ####################################
 
@@ -113,6 +165,7 @@ class SensorModel:
         # Convert the map to a numpy array
         self.map = np.array(map_msg.data, np.double)/100.
         self.map = np.clip(self.map, 0, 1)
+        self.map_resolution = map_msg.info.resolution
 
         # Convert the origin to a tuple
         origin_p = map_msg.info.origin.position
