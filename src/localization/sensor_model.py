@@ -79,36 +79,35 @@ class SensorModel:
         """
         length = self.table_width
         self.sensor_model_table = np.zeros((length, length))
+
         for d in range(length):
             #normalize p_hit, separately normalize p_tot
-            p_hit_tot = 0.
-            p_hit_arr = []
+            p_hit_arr = np.zeros(length)
             #p_hit normalized later
             norm = self.alpha_hit
-
+            
             for z in range(length):
-                p = 0.
-                p_hit = self.alpha_hit*np.exp(-float(z-d)**2/(2.*self.sigma_hit**2))/np.sqrt(2.0*np.pi)
-                p_hit_tot += p_hit
-                p_hit_arr.append(p_hit)
-                
+                p = 0.0
+                p_hit = self.alpha_hit*np.exp(-float(z-d)**2/(2.*self.sigma_hit**2))/(self.sigma_hit*np.sqrt(2.0*np.pi))
+                p_hit_arr[z] = p_hit
+
                 #p_short
                 if z <= d and d != 0:
-                    p += self.alpha_short*(2./d)*(1-(z/d))
+                    # p += self.alpha_short*(2./d)*(1-(z/d))
+                    p += 2.0*self.alpha_short*(d-z)/float(d**2)
                 #p_max
                 if z == self.zmax:
                     p += self.alpha_max
-
                 #p_rand
-                p += self.alpha_rand/float(self.zmax)
+                if z <= self.zmax:
+                    p += self.alpha_rand/float(self.zmax)
 
-                self.sensor_model_table[z,d] = prob
+                self.sensor_model_table[z,d] = p
                 norm += p
             #normalize all p_hit values for every value of z
-            self.sensor_model_table[:, d] += p_hit_arr/p_hit_tot
+            self.sensor_model_table[:, d] += self.alpha_hit * p_hit_arr / np.sum(p_hit_arr)
             #normalize all p values for every value of z
             self.sensor_model_table[:, d] /= norm
-
 
 
     def evaluate(self, particles, observation):
@@ -145,19 +144,15 @@ class SensorModel:
         scaling = float(self.map_resolution * self.lidar_scale_to_map_scale)
         scans = self.scan_sim.scan(particles) / scaling
         observation /= scaling
-
-        observation[i>self.zmax] = self.zmax
-        observation[i<0] = 0
-
-        scans[i>self.zmax] = self.zmax
-        scans[i<0] = 0
-
-        scans_int = np.rint(scans)
-        obs_int = np.rint(observation)
-
-        probabilities = np.prod(self.sensor_model_table[scans_int, obs_int] axis=1)
-        prob_squash = np.power(probabilities, 1./2.2)
-
+        observation[observation>self.zmax] = self.zmax
+        observation[observation<0] = 0
+        scans[scans>self.zmax] = self.zmax
+        scans[scans<0] = 0
+        # change type so we can index into table
+        scans_int = np.rint(scans).astype(np.uint16)
+        obs_int = np.rint(observation).astype(np.uint16)
+        probabilities = np.prod(self.sensor_model_table[obs_int, scans_int], axis=1)
+        prob_squash = np.power(probabilities, 1.0/2.2)
         return(prob_squash)
 
 
@@ -165,7 +160,7 @@ class SensorModel:
 
     def map_callback(self, map_msg):
         # Convert the map to a numpy array
-        self.map = np.array(map_msg.data, np.double)/100.
+        self.map = np.array(map_msg.data, np.double)/100.0
         self.map = np.clip(self.map, 0, 1)
         self.map_resolution = map_msg.info.resolution
 
@@ -190,5 +185,21 @@ class SensorModel:
 
         # Make the map set
         self.map_set = True
-
         print("Map initialized")
+
+    def visualize_sensor_table(self):
+        fig = plt.figure()
+        ax = fig.gca(projection='3d')
+
+        X = np.arange(0, self.table_width, 1.0)
+        Y = np.arange(0, self.table_width, 1.0)
+        X,Y = np.meshgrid(X, Y)
+
+        surf = ax.plot_surface(X, Y, self.sensor_model_table, rstride=2, cstride=2, linewidth=0,antialiased=True)
+
+        ax.text2D(0.05, 0.95, "Precomputed Sensor Model", transform=ax.transAxes)
+        ax.set_xlabel("GT distance")
+        ax.set_ylabel("Measured Distance")
+        ax.set_zlabel("P(Measured Distance | GT)")
+
+        plt.show()
