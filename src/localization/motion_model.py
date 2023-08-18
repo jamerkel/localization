@@ -13,12 +13,11 @@ class MotionModel:
         # model here.
         self.deterministic = rospy.get_param("~deterministic")
         self.num_particles = rospy.get_param("~num_particles")        
-        #initialize variance
-        self.x_v = 0.1 
-        self.y_v = 0.1
-        self.theta_v = 0.05
-
-        #initialize transformation matrix
+        # variance
+        self.x_v = 0.2
+        self.y_v = 0.2
+        self.theta_v = 0.25
+        # transformation matrix
         self.d_matrix = np.zeros((self.num_particles,3))
 
         ####################################
@@ -41,11 +40,8 @@ class MotionModel:
             particles: An updated matrix of the
                 same size
         """
-        dx = odometry[0]
-        dy = odometry[1]
-        dtheta = odometry[2]
+        dx, dy, dtheta = odometry[0], odometry[1], odometry[2]
         self.d_matrix[:,2] = dtheta
-
         particle_cos = np.cos(particles[:,2])
         particle_sin = np.sin(particles[:,2])
 
@@ -57,9 +53,7 @@ class MotionModel:
 
         self.d_matrix[:,0] = dx*particle_cos - dy*particle_sin
         self.d_matrix[:,1] = dx*particle_sin + dy*particle_cos
-        
         particles += self.d_matrix
-
         # add noise
         if self.deterministic == False:
             particles[:,0] += np.random.normal(0, self.x_v, self.num_particles)

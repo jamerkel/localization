@@ -14,15 +14,13 @@ class SensorModel:
 
 
     def __init__(self):
-        # Fetch parameters
+        # params
         self.map_topic = rospy.get_param("~map_topic")
         self.num_beams_per_particle = rospy.get_param("~num_beams_per_particle")
         self.scan_theta_discretization = rospy.get_param("~scan_theta_discretization")
         self.scan_field_of_view = rospy.get_param("~scan_field_of_view")
         self.num_particles = rospy.get_param("~num_particles")
         self.lidar_scale_to_map_scale = rospy.get_param("~lidar_scale_to_map_scale")
-
-
         ####################################
         # Adjust these parameters
         self.alpha_hit = 0.74
@@ -30,17 +28,14 @@ class SensorModel:
         self.alpha_max = 0.07
         self.alpha_rand = 0.12
         self.sigma_hit = 8.0
-
         # Your sensor table will be a `table_width` x `table_width` np array:
         self.zmax = self.num_particles
         self.table_width = self.zmax + 1
-
         ####################################
-
         # Precompute the sensor model table
         self.sensor_model_table = None
         self.precompute_sensor_model()
-
+        self.particle_scans = None
         # Create a simulated laser scan
         self.scan_sim = PyScanSimulator2D(
                 self.num_beams_per_particle,
@@ -48,7 +43,6 @@ class SensorModel:
                 0, # This is not the simulator, don't add noise
                 0.01, # This is used as an epsilon
                 self.scan_theta_discretization) 
-
         # Subscribe to the map
         self.map = None
         self.map_set = False
@@ -85,7 +79,7 @@ class SensorModel:
             p_hit_arr = np.zeros(length)
             #p_hit normalized later
             norm = self.alpha_hit
-            
+
             for z in range(length):
                 p = 0.0
                 p_hit = self.alpha_hit*np.exp(-float(z-d)**2/(2.*self.sigma_hit**2))/(self.sigma_hit*np.sqrt(2.0*np.pi))
@@ -110,7 +104,7 @@ class SensorModel:
             self.sensor_model_table[:, d] /= norm
 
 
-    def evaluate(self, particles, observation):
+    def evaluate(self, particles, obs):
         """
         Evaluate how likely each particle is given
         the observed scan.
@@ -122,13 +116,13 @@ class SensorModel:
                 [x1 y0 theta1]
                 [    ...     ]
 
-            observation: A vector of lidar data measured
+            obs: A vector of lidar data measured
                 from the actual lidar.
 
         returns:
            probabilities: A vector of length N representing
                the probability of each particle existing
-               given the observation and the map.
+               given the obs and the map.
         """
 
         if not self.map_set:
@@ -141,20 +135,19 @@ class SensorModel:
         # to perform ray tracing from all the particles.
         # This produces a matrix of size N x num_beams_per_particle 
 
-        scaling = float(self.map_resolution * self.lidar_scale_to_map_scale)
-        scans = self.scan_sim.scan(particles) / scaling
-        observation /= scaling
-        observation[observation>self.zmax] = self.zmax
-        observation[observation<0] = 0
-        scans[scans>self.zmax] = self.zmax
-        scans[scans<0] = 0
+        scaling = float(self.map_info.resolution * self.lidar_scale_to_map_scale)
+        self.scans = self.scan_sim.scan(particles) / scaling
+        obs /= scaling
+        obs[obs>self.zmax] = self.zmax
+        obs[obs<0] = 0
+        self.scans[self.scans>self.zmax] = self.zmax
+        self.scans[self.scans<0] = 0
         # change type so we can index into table
-        scans_int = np.rint(scans).astype(np.uint16)
-        obs_int = np.rint(observation).astype(np.uint16)
+        scans_int = np.rint(self.scans).astype(np.uint16)
+        obs_int = np.rint(obs).astype(np.uint16)
         probabilities = np.prod(self.sensor_model_table[obs_int, scans_int], axis=1)
-        prob_squash = np.power(probabilities, 1.0/2.2)
+        prob_squash = np.power(probabilities, 1.0/2.2, probabilities)
         return(prob_squash)
-
 
         ####################################
 
@@ -162,44 +155,34 @@ class SensorModel:
         # Convert the map to a numpy array
         self.map = np.array(map_msg.data, np.double)/100.0
         self.map = np.clip(self.map, 0, 1)
-        self.map_resolution = map_msg.info.resolution
-
-        # Convert the origin to a tuple
+        # self.map_resolution = map_msg.info.resolution
+        self.map_info = map_msg.info
+        # origin
         origin_p = map_msg.info.origin.position
         origin_o = map_msg.info.origin.orientation
-        origin_o = tf.transformations.euler_from_quaternion((
-                origin_o.x,
-                origin_o.y,
-                origin_o.z,
-                origin_o.w))
-        origin = (origin_p.x, origin_p.y, origin_o[2])
-
-        # Initialize a map with the laser scan
-        self.scan_sim.set_map(
-                self.map,
-                map_msg.info.height,
-                map_msg.info.width,
-                map_msg.info.resolution,
-                origin,
-                0.5) # Consider anything < 0.5 to be free
-
-        # Make the map set
+        origin_o_euler = tf.transformations.euler_from_quaternion((origin_o.x,origin_o.y,origin_o.z,origin_o.w))
+        origin = (origin_p.x, origin_p.y, origin_o_euler[2])
+        # Initialize map with laser scan
+        self.scan_sim.set_map(self.map, map_msg.info.height, map_msg.info.width, map_msg.info.resolution, origin, 0.5)
+        # unoccupied map region
+        masking = np.array(map_msg.data).reshape((map_msg.info.height, map_msg.info.width))
+        self.permissible_region = np.zeros_like(masking, dtype=bool)
+        self.permissible_region[masking==0] = 1
         self.map_set = True
-        print("Map initialized")
 
-    def visualize_sensor_table(self):
-        fig = plt.figure()
-        ax = fig.gca(projection='3d')
+    # def visualize_sensor_table(self):
+    #     fig = plt.figure()
+    #     ax = fig.gca(projection='3d')
 
-        X = np.arange(0, self.table_width, 1.0)
-        Y = np.arange(0, self.table_width, 1.0)
-        X,Y = np.meshgrid(X, Y)
+    #     X = np.arange(0, self.table_width, 1.0)
+    #     Y = np.arange(0, self.table_width, 1.0)
+    #     X,Y = np.meshgrid(X, Y)
 
-        surf = ax.plot_surface(X, Y, self.sensor_model_table, rstride=2, cstride=2, linewidth=0,antialiased=True)
+    #     surf = ax.plot_surface(X, Y, self.sensor_model_table, rstride=2, cstride=2, linewidth=0,antialiased=True)
 
-        ax.text2D(0.05, 0.95, "Precomputed Sensor Model", transform=ax.transAxes)
-        ax.set_xlabel("GT distance")
-        ax.set_ylabel("Measured Distance")
-        ax.set_zlabel("P(Measured Distance | GT)")
+    #     ax.text2D(0.05, 0.95, "Precomputed Sensor Model", transform=ax.transAxes)
+    #     ax.set_xlabel("GT distance")
+    #     ax.set_ylabel("Measured Distance")
+    #     ax.set_zlabel("P(Measured Distance | GT)")
 
-        plt.show()
+    #     plt.show()
